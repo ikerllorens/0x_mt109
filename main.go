@@ -4,7 +4,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
+	"log"
 	"math"
+	"sync"
+	"time"
 )
 
 type InputFile struct {
@@ -26,8 +29,12 @@ type Cycle struct {
 	Start         *Node
 }
 
-func main() {
+type ConcurrencyData struct {
+	Position int
+	Distance float64
+}
 
+func main() {
 	file, err := ioutil.ReadFile("1000_cm.json")
 	if err != nil {
 		panic(err)
@@ -38,13 +45,50 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
-
 	nodePool := AssembleNodePool(&inputFIle)
 	c := &Cycle{
 		NodesIncluded: 0,
 		Start:         nil,
 	}
 
+	start := time.Now()
+	Linear(nodePool, c)
+	log.Printf("Linear Ellapsed %v\n", time.Since(start))
+	PrintCycle(c)
+
+	nodePool2 := AssembleNodePool(&inputFIle)
+	c2 := &Cycle{
+		NodesIncluded: 0,
+		Start:         nil,
+	}
+	time.Sleep(5 * time.Second)
+
+	start = time.Now()
+	Concurrent(nodePool2, c2)
+	log.Printf("Ellapsed %v\n", time.Since(start))
+
+	PrintCycle(c2)
+
+	return
+}
+
+func PrintCycle(c *Cycle) {
+	n := c.Start
+	for i := 0; i < c.NodesIncluded; i++ {
+		fmt.Print(n.NodeID, "->")
+		n = n.Next
+	}
+	fmt.Print(n.NodeID, "\n")
+
+	n = c.Start
+	for i := 0; i < c.NodesIncluded; i++ {
+		fmt.Println("Node:", n.NodeID, "Distance to next: ", n.DistanceToOtherNodes[n.Next.NodeID])
+		n = n.Next
+	}
+
+}
+
+func Linear(nodePool []*Node, c *Cycle) {
 	for i := 0; i < len(nodePool); i++ {
 		if nodePool[i] == nil {
 			continue
@@ -61,28 +105,6 @@ func main() {
 
 			continue
 		} else if c.NodesIncluded == 1 {
-			/*n := c.Start
-			shortestNodeDistance := math.MaxFloat64
-
-			selected := 0
-			for j := range n.DistanceToOtherNodes {
-				if n.DistanceToOtherNodes[j] == 0 {
-					continue
-				}
-
-				if n.DistanceToOtherNodes[j] < shortestNodeDistance {
-					selected = j
-					shortestNodeDistance = n.DistanceToOtherNodes[j]
-					c.Start.Next = nodePool[j]
-					c.Start.Before = nodePool[j]
-
-					nodePool[j].Next = c.Start
-					nodePool[j].Before = c.Start
-				}
-			}
-
-			nodePool[selected] = nil
-			c.NodesIncluded++*/
 			c.Start.Next = nodePool[i]
 			c.Start.Before = nodePool[i]
 
@@ -116,8 +138,6 @@ func main() {
 				currentNode = currentNode.Next
 			}
 
-			fmt.Println("Should be inserted in:", position)
-
 			currentNode = c.Start
 			for j = 0; j < position; j++ {
 				currentNode = currentNode.Next
@@ -134,16 +154,90 @@ func main() {
 		}
 	}
 
-	n := c.Start
-	for i := 0; i < c.NodesIncluded; i++ {
-		fmt.Print(n.NodeID, "->")
-		n = n.Next
-	}
+}
 
-	n = c.Start
-	for i := 0; i < c.NodesIncluded; i++ {
-		fmt.Println("Node:", n.NodeID, "Distance to next: ", n.DistanceToOtherNodes[n.Next.NodeID])
-		n = n.Next
+func Concurrent(nodePool []*Node, c *Cycle) {
+	for i := 0; i < len(nodePool); i++ {
+		if nodePool[i] == nil {
+			continue
+		}
+		// I can assume when the cycle is empty, the pool is full, so I can get the first element
+		if c.NodesIncluded == 0 {
+			c.Start = nodePool[i]
+			nodePool[i] = nil
+
+			c.Start.Next = c.Start
+			c.Start.Before = c.Start
+
+			c.NodesIncluded++
+
+			continue
+		} else if c.NodesIncluded == 1 {
+			c.Start.Next = nodePool[i]
+			c.Start.Before = nodePool[i]
+
+			nodePool[i].Next = c.Start
+			nodePool[i].Before = c.Start
+
+			nodePool[i] = nil
+			c.NodesIncluded++
+		} else {
+			//dik+dkj-dij
+			currentNode := c.Start.Next
+			position := 0
+			distance := math.MaxFloat64
+
+			var wg sync.WaitGroup
+			j := 0
+			dChannel := make(chan ConcurrencyData)
+
+			for currentNode != c.Start {
+				wg.Add(1)
+				//j = 0
+				go func(pos int, n, cn *Node, group *sync.WaitGroup) {
+					defer group.Done()
+					dik := n.DistanceToOtherNodes[cn.NodeID]
+					dkj := n.DistanceToOtherNodes[cn.Next.NodeID]
+					dij := cn.DistanceToOtherNodes[cn.Next.NodeID]
+
+					d := dik + dkj - dij
+					dChannel <- ConcurrencyData{
+						Position: pos,
+						Distance: d,
+					}
+
+				}(j, nodePool[i], currentNode, &wg)
+				j++
+
+				currentNode = currentNode.Next
+			}
+
+			go func(g *sync.WaitGroup, channel chan ConcurrencyData) {
+				g.Wait()
+				close(dChannel)
+			}(&wg, dChannel)
+
+			for d := range dChannel {
+				if d.Distance < distance {
+					distance = d.Distance
+					position = d.Position
+				}
+			}
+
+			currentNode = c.Start
+			for j = 0; j < position; j++ {
+				currentNode = currentNode.Next
+			}
+
+			tmpN := currentNode.Next
+			tmpN.Before = nodePool[i]
+			currentNode.Next = nodePool[i]
+			nodePool[i].Next = tmpN
+			nodePool[i].Before = currentNode
+
+			nodePool[i] = nil
+			c.NodesIncluded++
+		}
 	}
 
 	return
